@@ -62,8 +62,6 @@ mean, std = mean[:, target].item(), std[:, target].item()
 
 test_dataset = dataset[:128]
 train_dataset = dataset[2000:2128]
-test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
 
 class Net(torch.nn.Module):
@@ -108,14 +106,14 @@ class Net(torch.nn.Module):
         if w is not None:
             self.loadparameters(w)
         self.los = 0
-        for i, sample in enumerate(data, 0):
+        for i, sample in enumerate(data, 0):          
             labels = sample.y
-            predicted = self.forward(sample.x,sample.edge_index,sample.edge_attr,sample.batch)
-            loss = self.criterion(predicted, labels)
             self.optimizer.zero_grad()
+            predicted = self.forward(sample.x,sample.edge_index,sample.edge_attr,sample.batch)
+            loss = F.mse_loss(predicted, labels)
             loss.backward()
+            self.los += loss.item() * sample.num_graphs
             self.optimizer.step()
-            self.los += copy.deepcopy(loss.item())
         return copy.deepcopy(self.state_dict())
 
     def getparameters(self, w=None):
@@ -160,44 +158,37 @@ class MCMC:
         self.use_langevin_gradients = use_langevin_gradients
         self.batch_size = batch_size
         self.l_prob=0.5
-        self.tau_sq=25
-
-    def rmse(self, pred, actual):
-        return np.sqrt(((pred - actual) ** 2).mean())
-
-    def likelihood_func(self, gnn, data, w=None):
-        y = torch.zeros((len(data), self.batch_size))
-        for i, dat in enumerate(data, 0):
+        self.tau_sq=0.5
+        
+    def error(self, loader):
+        error=0
+        for data in loader:
+            error += (self.gnn(data.x,data.edge_index,data.edge_attr,data.batch) * std - data.y * std).abs().sum().item()  # MAE
+        return error/ len(loader.dataset)
+    
+    def likelihood_func(self, gnn, loader, tau_pro, w=None):
+        y = torch.zeros((len(loader), self.batch_size))
+        for i, dat in enumerate(loader, 0):
             labels = dat.y
             y[i]=labels
         if w is not None:
-            fx = self.gnn.evaluate_proposal(data, w)
+            fx = self.gnn.evaluate_proposal(loader, w)
         else:
-            fx = self.gnn.evaluate_proposal(data)
+            fx = self.gnn.evaluate_proposal(loader)
+        error = self.error(loader)
         y=y.numpy()
         fx=fx.numpy()
         y=y.ravel()
         fx=fx.ravel()
-        rmse = self.rmse(fx, y)
-        loss = np.sum(-0.5 * np.log(2 * math.pi * self.tau_sq) - 0.5 * np.square(y - fx) / self.tau_sq)
+        loss = np.sum(-0.5 * np.log(2 * math.pi * tau_pro) - 0.5 * np.square(y - fx) / tau_pro)
         lhood=np.sum(loss)
-        return [lhood, fx, rmse]
+        return [lhood, fx, error]
 
     def prior_likelihood(self, sigma_squared, w_list):
         part1 = -1 * ((len(w_list)) / 2) * np.log(sigma_squared)
         part2 = 1 / (2 * sigma_squared) * (sum(np.square(w_list)))
         log_loss = part1 - part2
         return log_loss
-
-    def accuracy(self, data):
-        correct = 0
-        total = 0
-        for dat in data:
-            labels = dat.y
-            predicted = self.gnn.forward(dat.x,dat.edge_index,dat.edge_attr,dat.batch)
-            total += batch_size
-            correct += (predicted == labels).sum().item()
-        return 100 * correct / total
 
     def sampler(self):
         samples = self.samples
@@ -206,8 +197,8 @@ class MCMC:
         w_size = len(gnn.getparameters(w))
         rmse_train = np.zeros(samples)
         rmse_test = np.zeros(samples)
-        acc_train = np.zeros(samples)
-        acc_test = np.zeros(samples)
+        #acc_train = np.zeros(samples)
+        #acc_test = np.zeros(samples)
 
         likelihood_proposal_array = np.zeros(samples)
         likelihood_array=np.zeros(samples)
@@ -216,35 +207,39 @@ class MCMC:
         weight_array1=np.zeros(samples)
         weight_array2=np.zeros(samples)
         sum_value_array=np.zeros(samples)
+        
+        pred_train=gnn.evaluate_proposal(self.traindata)
+        pred_train=pred_train.numpy()
+        pred_train=pred_train.ravel()
 
-        eta = 0
+        y_train = torch.zeros((len(self.traindata), self.batch_size))
+        for i, dat in enumerate(self.traindata, 0):
+            y_train[i] = dat.y
+
+        y_train=y_train.numpy()
+        y_train=y_train.ravel()
+
+        eta = np.log(np.var(pred_train - y_train))
+        tau_pro = np.exp(eta)
+
         w_proposal = np.random.randn(w_size)
         w_proposal = gnn.dictfromlist(w_proposal)
-        step_w = 0.05
+        step_w = 0.005
         train = self.traindata  # data_load(data='train')
         test = self.testdata  # data_load(data= 'test')
         sigma_squared = 25
         prior_current = self.prior_likelihood(sigma_squared, gnn.getparameters(w))
 
-        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train)
-        [_, pred_test, rmsetest] = self.likelihood_func(gnn, test)
-
-        y_test = torch.zeros((len(test), self.batch_size))
-        for i, dat in enumerate(test, 0):
-            labels = dat.y
-            y_test[i] = copy.deepcopy(labels)
-        y_train = torch.zeros((len(train), self.batch_size))
-        for i, dat in enumerate(train, 0):
-            labels = dat.y
-            y_train[i] = copy.deepcopy(labels)
+        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, tau_pro)
+        [_, pred_test, rmsetest] = self.likelihood_func(gnn, test, tau_pro)
 
         num_accepted = 0
         langevin_count = 0
         init_count = 0
         rmse_train[0] = rmsetrain
         rmse_test[0] = rmsetest
-        acc_train[0] = self.accuracy(train)
-        acc_test[0] = self.accuracy(test)
+        #acc_train[0] = self.accuracy(train)
+        #acc_test[0] = self.accuracy(test)
         likelihood_proposal_array[0] = 0
         likelihood_array[0] = 0
         diff_likelihood_array[0] = 0
@@ -275,8 +270,8 @@ class MCMC:
                 diff_prop = 0
                 w_proposal = gnn.addnoiseandcopy(0, step_w)  # np.random.normal(w, step_w, w_size)
 
-            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train)
-            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test)
+            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train, tau_pro)
+            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test, tau_pro)
 
             prior_prop = self.prior_likelihood(sigma_squared,
                                                gnn.getparameters(w_proposal))  # takes care of the gradients
@@ -299,19 +294,19 @@ class MCMC:
                 likelihood = likelihood_proposal
                 prior_current = prior_prop
                 w = copy.deepcopy(w_proposal)  # rnn.getparameters(w_proposal)
-                acc_train1 = self.accuracy(train)
-                acc_test1 = self.accuracy(test)
+                #acc_train1 = self.accuracy(train)
+                #acc_test1 = self.accuracy(test)
                 print(i, rmsetrain, rmsetest, acc_train1, acc_test1, 'accepted')
                 rmse_train[i] = rmsetrain
                 rmse_test[i] = rmsetest
-                acc_train[i,] = acc_train1
-                acc_test[i,] = acc_test1
+                #acc_train[i,] = acc_train1
+                #acc_test[i,] = acc_test1
 
             else:
                 w = old_w
                 gnn.loadparameters(w)
-                acc_train1 = self.accuracy(train)
-                acc_test1 = self.accuracy(test)
+                #acc_train1 = self.accuracy(train)
+                #acc_test1 = self.accuracy(test)
                 print(i, rmsetrain, rmsetest, acc_train1, acc_test1, 'rejected')
                 # rmse_train[i] = rmsetrain
                 # rmse_test[i] = rmsetest
@@ -319,8 +314,8 @@ class MCMC:
                 # acc_test[i,] = acc_test1
                 rmse_train[i,] = rmse_train[i - 1,]
                 rmse_test[i,] = rmse_test[i - 1,]
-                acc_train[i,] = acc_train[i - 1,]
-                acc_test[i,] = acc_test[i - 1,]
+                #acc_train[i,] = acc_train[i - 1,]
+                #acc_test[i,] = acc_test[i - 1,]
 
             ll = gnn.getparameters()
             weight_array[i] = ll[0]
@@ -331,16 +326,96 @@ class MCMC:
 
         print((langevin_count * 100 / (samples * 1.0)), '% was Langevin')
 
-        return acc_train, acc_test, rmse_train, rmse_test, sum_value_array, weight_array, weight_array1, weight_array2
+        return rmse_train, rmse_test, sum_value_array, weight_array, weight_array1, weight_array2
 
 def main():
-
+    
     ulg = True
-    numSamples=10
-    learnr = 0.01
+    numSamples=200
+    learnr = 0.001
     burnin=0.25
 
     mcmc = MCMC(numSamples, ulg, learnr, batch_size)  # declare class
-    acc_train, acc_test, rmse_train, rmse_test, sva, wa, wa1, wa2 = mcmc.sampler()
+    rmse_train, rmse_test, sva, wa, wa1, wa2 = mcmc.sampler()
+
+    np.savetxt("array_weight.txt", wa, fmt="%s")
+    np.savetxt("array_weight1.txt", wa1, fmt="%s")
+    np.savetxt("array_weight2.txt", wa2, fmt="%s")
+
+    #acc_train = acc_train[int(numSamples * burnin):]
+    #acc_test = acc_test[int(numSamples * burnin):]
+    rmse_train = rmse_train[int(numSamples * burnin):]
+    rmse_test = rmse_test[int(numSamples * burnin):]
+    sva = sva[int(numSamples * burnin):]
+
+    print("\n\n\n\n\n\n\n\n")
+    print("Mean of RMSE Train")
+    print(np.mean(rmse_train))
+    print("\n")
+    #print("Mean of Accuracy Train")
+    #print(np.mean(acc_train))
+    #print("\n")
+    print("Mean of RMSE Test")
+    print(np.mean(rmse_test))
+    print("\n")
+    #print("Mean of Accuracy Test")
+    #print(np.mean(acc_test))
+    print('sucessfully sampled')
+
+    problemfolder = 'QM9_single_chain'
+    os.makedirs(problemfolder)
+
+    x = np.linspace(0, int(numSamples - numSamples * burnin), num=int(numSamples - numSamples * burnin))
+    x1 = np.linspace(0, numSamples, num=numSamples)
+
+    plt.plot(x1, wa, label='Weight[0]')
+    plt.legend(loc='upper right')
+    plt.title("Weight[0] Trace")
+    plt.savefig('QM9_single_chain' + '/weight[0]_samples.png')
+    plt.clf()
+
+    plt.plot(x1, wa1, label='Weight[100]')
+    plt.legend(loc='upper right')
+    plt.title("Weight[100] Trace")
+    plt.savefig('QM9_single_chain' + '/weight[100]_samples.png')
+    plt.clf()
+
+    plt.plot(x1, wa2, label='Weight[50000]')
+    plt.legend(loc='upper right')
+    plt.title("Weight[50000] Trace")
+    plt.savefig('QM9_single_chain' + '/weight[50000]_samples.png')
+    plt.clf()
+
+    plt.plot(x, sva, label='Sum_Value')
+    plt.legend(loc='upper right')
+    plt.title("Sum Value Over Samples")
+    plt.savefig('QM9_single_chain' + '/sum_value_samples.png')
+    plt.clf()
+
+    fig, ax1 = plt.subplots()
+
+    color = 'tab:red'
+    ax1.set_xlabel('Samples')
+    ax1.set_ylabel('MAE Train', color=color)
+    ax1.plot(x, rmse_train, color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    fig.tight_layout()
+    plt.savefig('QM9_single_chain' + '/rmse_train.png')
+    plt.clf()
+
+    fig1,ax2 = plt.subplots()
+
+    color = 'tab:blue'
+    ax2.set_xlabel('Samples')
+    ax2.set_ylabel('MAE Test', color=color)
+    ax2.plot(x, rmse_test, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    fig1.tight_layout()
+    plt.savefig('QM9_single_chain' + '/rmse_test.png')
+    plt.clf()
 
 if __name__ == "__main__": main()
+
+   
