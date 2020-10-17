@@ -18,7 +18,7 @@ args = parser.parse_args()
 
 dataset = 'Cora'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
-dataset = Planetoid(path, dataset, split='public',num_train_per_class=242,num_val=0,num_test=1014, transform=T.NormalizeFeatures())
+dataset = Planetoid(path, dataset, split='public', num_train_per_class=242,num_val=0,num_test=1014, transform=T.NormalizeFeatures())
 graph_data = dataset[0]
 
 num_class = 7
@@ -316,7 +316,7 @@ class MCMC:
 def main():
 
 
-    numSamples = 5000
+    numSamples = 50
 
     ulg = True
 
@@ -346,40 +346,40 @@ def main():
     print(np.mean(acc_test))
     print ('sucessfully sampled')
 
-    problemfolder = dataset + '_single_chain'
+    problemfolder = 'Cora_single_chain'
     os.makedirs(problemfolder)
 
-    x = np.linspace(0, int(numSamples-numSamples*burnin), num=int(numSamples-numSamples*burnin))
+    x = np.linspace(0, int(numSamples-numSamples*burnin), num=int(numSamples-numSamples*burnin)+1)
     x1 = np.linspace(0, numSamples, num=numSamples)
 
     plt.plot(x1, wa, label='Weight[0]')
     plt.legend(loc='upper right')
     plt.title("Weight[0] Trace")
-    plt.savefig(dataset + '_single_chain' + '/weight[0]_samples.png')
+    plt.savefig('Cora_single_chain' + '/weight[0]_samples.png')
     plt.clf()
 
     plt.plot(x1, wa1, label='Weight[1]')
     plt.legend(loc='upper right')
     plt.title("Weight[100] Trace")
-    plt.savefig(dataset + '_single_chain' + '/weight[1]_samples.png')
+    plt.savefig('Cora_single_chain' + '/weight[1]_samples.png')
     plt.clf()
 
     plt.plot(x1,wa2, label='Weight[2]')
     plt.legend(loc='upper right')
     plt.title("Weight[50000] Trace")
-    plt.savefig(dataset + '_single_chain' + '/weight[2]_samples.png')
+    plt.savefig('Cora_single_chain' + '/weight[2]_samples.png')
     plt.clf()
 
     plt.plot(x1, wa3, label='Weight[3]')
     plt.legend(loc='upper right')
     plt.title("Weight[10000] Trace")
-    plt.savefig(dataset + '_single_chain' + '/weight[3]_samples.png')
+    plt.savefig('Cora_single_chain' + '/weight[3]_samples.png')
     plt.clf()
 
     plt.plot(x, sva, label='Sum_Value')
     plt.legend(loc='upper right')
     plt.title("Sum Value Over Samples")
-    plt.savefig(dataset + '_single_chain'+'/sum_value_samples.png')
+    plt.savefig('Cora_single_chain'+'/sum_value_samples.png')
     plt.clf()
 
     fig, ax1 = plt.subplots()
@@ -399,7 +399,7 @@ def main():
 
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped
-    plt.savefig(dataset + '_single_chain' + '/superimposed_acc.png')
+    plt.savefig('Cora_single_chain' + '/superimposed_acc.png')
     plt.clf()
 
     fig1, ax4 = plt.subplots()
@@ -419,7 +419,7 @@ def main():
 
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped
-    plt.savefig(dataset + '_single_chain' + '/superimposed_rmse.png')
+    plt.savefig('Cora_single_chain' + '/superimposed_rmse.png')
     plt.clf()
 
 
