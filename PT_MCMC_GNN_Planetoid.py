@@ -17,7 +17,7 @@ from torch_geometric.nn import GCNConv, ChebConv
 
 mpl.use('agg')
 
-dataset = 'Cora'  # Can be changed to 'CiteSeer' or 'PubMed' 
+dataset = 'Cora'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
 dataset = Planetoid(path, dataset, split='public', num_train_per_class=242,num_val=0,num_test=1014, transform=T.NormalizeFeatures())
 graph_data = dataset[0]
@@ -29,22 +29,17 @@ num_test= len(graph_data.y[graph_data.test_mask])
 # Initialise and parse command-line inputs
 
 parser = argparse.ArgumentParser(description='PT MCMC CNN')
-parser.add_argument('-s', '--samples', help='Number of samples', default=800, dest="samples", type=int)
+parser.add_argument('-s', '--samples', help='Number of samples', default=8000, dest="samples", type=int)
 parser.add_argument('-r', '--replicas', help='Number of chains/replicas, best to have one per availble core/cpu',
                     default=4, dest="num_chains", type=int)
 parser.add_argument('-lr', '--learning_rate', help='Learning Rate for Model', dest="learning_rate",
-                    default=0.01, type=float)
-parser.add_argument('-swap', '--swap', help='Swap Ratio', dest="swap_ratio", default=0.005, type=float)
+                    default=0.001, type=float)
 parser.add_argument('-b', '--burn', help='How many samples to discard before determing posteriors', dest="burn_in",
                     default=0.50, type=float)
 parser.add_argument('-pt', '--ptsamples', help='Ratio of PT vs straight MCMC samples to run', dest="pt_samples",
                     default=0.50, type=float)
 parser.add_argument('-step', '--step_size', help='Step size for proposals (0.02, 0.05, 0.1 etc)', dest="step_size",
                     default=0.005, type=float)
-parser.add_argument('-t', '--temperature', help='Demoninator to determine Max Temperature of chains (MT=no.chains*t) ',
-                    default=2, dest="mt_val", type=int)  # Junk
-parser.add_argument('-n', '--net', help='Choose rnn net, "1" for RNN, "2" for GRU, "3" for LSTM', default=4, dest="net",
-                    type=int)  # Junk
 parser.add_argument('--use_gdc', action='store_true',
                     help='Use GDC preprocessing.')
 args = parser.parse_args()
@@ -165,7 +160,7 @@ class ptReplica(multiprocessing.Process):
         self.use_langevin_gradients = use_langevin_gradients
         self.sgd_depth = 1  # Keep as 1
         self.learn_rate = learn_rate
-        self.l_prob = 0.5  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
+        self.l_prob = 0.6  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
         self.step_size = step_size
 
     def rmse(self, predictions, targets):
@@ -340,10 +335,10 @@ class ptReplica(multiprocessing.Process):
 
             ll = gnn.getparameters()
             weight_array[i] = ll[0]
-            weight_array1[i] = ll[1]
-            weight_array2[i] = ll[2]
-            weight_array3[i] = ll[3]
-            weight_array4[i] = ll[4]
+            weight_array1[i] = ll[100]
+            weight_array2[i] = ll[1000]
+            weight_array3[i] = ll[10000]
+            weight_array4[i] = ll[20000]
 
             if (i + 1) % self.swap_interval == 0:
                 param = np.concatenate([np.asarray([gnn.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1),
@@ -379,16 +374,16 @@ class ptReplica(multiprocessing.Process):
         file_name = self.path + '/predictions/weight[0]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[1]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[100]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array1, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[2]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[1000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array2, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[3]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[10000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array3, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[4]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[20000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array4, fmt='%1.2f')
 
         file_name = self.path + '/predictions/rmse_test_chain_' + str(self.temperature) + '.txt'
@@ -721,19 +716,19 @@ class ParallelTempering:
             dat = np.loadtxt(file_name)
             weight_ar[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[1]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[100]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar1[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[2]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[1000]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar2[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[3]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[10000]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar3[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[4]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[20000]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar4[i, :] = dat
 
@@ -804,52 +799,52 @@ class ParallelTempering:
         plt.savefig(self.path + '/graphs/weight[0]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar1, label='Weight[1]')
+        plt.plot(x1, weight_ar1, label='Weight[100]')
         plt.legend(loc='upper right')
-        plt.title("Weight[1] Trace")
-        plt.savefig(self.path + '/graphs/weight[1]_samples.png')
+        plt.title("Weight[100] Trace")
+        plt.savefig(self.path + '/graphs/weight[100]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar1, bins=20, color="blue", alpha=0.7)
         plt.ylabel('Frequency')
         plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[1]_hist.png')
+        plt.savefig(self.path + '/graphs/weight[100]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar2, label='Weight[2]')
+        plt.plot(x1, weight_ar2, label='Weight[1000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[2] Trace")
-        plt.savefig(self.path + '/graphs/weight[2]_samples.png')
+        plt.title("Weight[1000] Trace")
+        plt.savefig(self.path + '/graphs/weight[1000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar2, bins=20, color="blue", alpha=0.7)
         plt.ylabel('Frequency')
         plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[2]_hist.png')
+        plt.savefig(self.path + '/graphs/weight[1000]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar3, label='Weight[3]')
+        plt.plot(x1, weight_ar3, label='Weight[10000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[3] Trace")
-        plt.savefig(self.path + '/graphs/weight[3]_samples.png')
+        plt.title("Weight[10000] Trace")
+        plt.savefig(self.path + '/graphs/weight[10000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar3, bins=20, color="blue", alpha=0.7)
         plt.ylabel('Frequency')
         plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[3]_hist.png')
+        plt.savefig(self.path + '/graphs/weight[10000]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar4, label='Weight[4]')
+        plt.plot(x1, weight_ar4, label='Weight[20000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[4] Trace")
-        plt.savefig(self.path + '/graphs/weight[4]_samples.png')
+        plt.title("Weight[20000] Trace")
+        plt.savefig(self.path + '/graphs/weight[20000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar4, bins=20, color="blue", alpha=0.7)
         plt.ylabel('Frequency')
         plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[4]_hist.png')
+        plt.savefig(self.path + '/graphs/weight[20000]_hist.png')
         plt.clf()
 
         plt.plot(x1, sum_val_array, label='Sum_Value')
@@ -888,15 +883,13 @@ def main():
 
     numSamples = args.samples
     num_chains = args.num_chains
-    swap_ratio = args.swap_ratio
     burn_in = args.burn_in
     learning_rate = args.learning_rate
     step_size = args.step_size
     maxtemp = 2
     use_langevin_gradients = True  # False leaves it as Random-walk proposals. Note that Langevin gradients will take a bit more time computationally
     bi = burn_in
-    swap_interval = int(
-        swap_ratio * numSamples / num_chains)  # int(swap_ratio * (NumSample/num_chains)) #how ofen you swap neighbours. note if swap is more than Num_samples, its off
+    swap_interval = 2 #how ofen you swap neighbours. note if swap is more than Num_samples, its off
 
     # learn_rate = 0.01  # in case langevin gradients are used. Can select other values, we found small value is ok.
 
@@ -979,7 +972,7 @@ def main():
     print("Test Acc (Mean, Max, Std)")
     print(acc_tes, acctes_max, acctest_std)
     print("\n")
-    print("Train RMSE (Mean, Max, Std)")  
+    print("Train RMSE (Mean, Max, Std)")
     print(rmse_tr, rmsetr_max, rmsetr_std)
     print("\n")
     print("Test RMSE (Mean, Max, Std)")
