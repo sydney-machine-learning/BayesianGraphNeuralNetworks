@@ -17,27 +17,26 @@ from torch_geometric.nn import GCNConv, ChebConv
 
 mpl.use('agg')
 
-dataset = 'Cora'
+dataset = 'PubMed'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
-dataset = Planetoid(path, dataset, split='public', num_train_per_class=242,num_val=0,num_test=1014, transform=T.NormalizeFeatures())
+dataset = Planetoid(path, dataset, split='public',transform=T.NormalizeFeatures())
 graph_data = dataset[0]
 
-num_class = 7
 num_train = len(graph_data.y[graph_data.train_mask])
 num_test= len(graph_data.y[graph_data.test_mask])
 
 # Initialise and parse command-line inputs
 
 parser = argparse.ArgumentParser(description='PT MCMC CNN')
-parser.add_argument('-s', '--samples', help='Number of samples', default=8000, dest="samples", type=int)
+parser.add_argument('-s', '--samples', help='Number of samples', default=48000, dest="samples", type=int)
 parser.add_argument('-r', '--replicas', help='Number of chains/replicas, best to have one per availble core/cpu',
-                    default=4, dest="num_chains", type=int)
+                    default=8, dest="num_chains", type=int)
 parser.add_argument('-lr', '--learning_rate', help='Learning Rate for Model', dest="learning_rate",
-                    default=0.001, type=float)
+                    default=0.01, type=float)
 parser.add_argument('-b', '--burn', help='How many samples to discard before determing posteriors', dest="burn_in",
-                    default=0.50, type=float)
+                    default=0.60, type=float)
 parser.add_argument('-pt', '--ptsamples', help='Ratio of PT vs straight MCMC samples to run', dest="pt_samples",
-                    default=0.50, type=float)
+                    default=0.60, type=float)
 parser.add_argument('-step', '--step_size', help='Step size for proposals (0.02, 0.05, 0.1 etc)', dest="step_size",
                     default=0.005, type=float)
 parser.add_argument('--use_gdc', action='store_true',
@@ -60,7 +59,11 @@ class Net(torch.nn.Module):
                              normalize=not args.use_gdc)
         self.conv2 = GCNConv(16, dataset.num_classes, cached=True,
                              normalize=not args.use_gdc)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lrate)
+        #self.optimizer = torch.optim.Adam(self.parameters(), lr=lrate, weight_decay=0.0005)
+        self.optimizer = torch.optim.Adam([
+            dict(params=self.conv1.parameters(),weight_decay=5e-4),
+            dict(params=self.conv2.parameters(),weight_decay=0)
+        ], lr=lrate)
         # self.conv1 = ChebConv(data.num_features, 16, K=2)
         # self.conv2 = ChebConv(16, data.num_features, K=2)
 
@@ -177,7 +180,7 @@ class ptReplica(multiprocessing.Process):
             rmse = self.gnn.los / num_train
             lhood = 0
             for i in range(num_train):
-                for k in range(num_class):
+                for k in range(dataset.num_classes):
                     if k == y[i]:
                         if prob[i, k] == 0:
                             lhood+=0
@@ -188,14 +191,14 @@ class ptReplica(multiprocessing.Process):
             rmse = self.gnn.los / num_test
             lhood = 0
             for i in range(num_test):
-                for k in range(num_class):
+                for k in range(dataset.num_classes):
                     if k == y[i]:
                         if prob[i, k] == 0:
                             lhood += 0
                         else:
                             lhood += (prob[i, k])
 
-        return [lhood, fx, rmse]
+        return [lhood / self.adapttemp , fx, rmse]
 
     def prior_likelihood(self, sigma_squared, w_list):
         part1 = -1 * ((len(w_list)) / 2) * np.log(sigma_squared)
@@ -230,6 +233,9 @@ class ptReplica(multiprocessing.Process):
         rmse_test = np.zeros(samples)
         acc_train = np.zeros(samples)
         acc_test = np.zeros(samples)
+        likelihood_proposal_array = np.zeros(samples)
+        likelihood_array = np.zeros(samples)
+        diff_likelihood_array = np.zeros(samples)
         weight_array = np.zeros(samples)
         weight_array1 = np.zeros(samples)
         weight_array2 = np.zeros(samples)
@@ -260,6 +266,9 @@ class ptReplica(multiprocessing.Process):
         acc_train[0] = self.accuracy(train)
         acc_test[0] = self.accuracy(test)
 
+        likelihood_proposal_array[0] = 0
+        likelihood_array[0] = 0
+        diff_likelihood_array[0] = 0
         weight_array[0] = 0
         weight_array1[0] = 0
         weight_array2[0] = 0
@@ -288,10 +297,11 @@ class ptReplica(multiprocessing.Process):
                 w_prop_gd = gnn.langevin_gradient()
                 wc_delta = (gnn.getparameters(w) - gnn.getparameters(w_prop_gd))
                 wp_delta = (gnn.getparameters(w_proposal) - gnn.getparameters(w_gd))
-                sigma_sq = step_w
+                sigma_sq = step_w * step_w
                 first = -0.5 * np.sum(wc_delta * wc_delta) / sigma_sq  # this is wc_delta.T  *  wc_delta /sigma_sq
                 second = -0.5 * np.sum(wp_delta * wp_delta) / sigma_sq
                 diff_prop = first - second
+                diff_prop = diff_prop / self.adapttemp
                 langevin_count = langevin_count + 1
             else:
                 diff_prop = 0
@@ -304,6 +314,10 @@ class ptReplica(multiprocessing.Process):
                                                gnn.getparameters(w_proposal))  # takes care of the gradients
             diff_likelihood = likelihood_proposal - likelihood
             diff_prior = prior_prop - prior_current
+
+            likelihood_proposal_array[i] = likelihood_proposal
+            likelihood_array[i] = likelihood
+            diff_likelihood_array[i] = diff_likelihood
 
             sum_value = diff_likelihood + diff_prior + diff_prop
             sum_value_array[i] = sum_value
@@ -337,8 +351,8 @@ class ptReplica(multiprocessing.Process):
             weight_array[i] = ll[0]
             weight_array1[i] = ll[100]
             weight_array2[i] = ll[1000]
-            weight_array3[i] = ll[10000]
-            weight_array4[i] = ll[20000]
+            weight_array3[i] = ll[5000]
+            weight_array4[i] = ll[8000]
 
             if (i + 1) % self.swap_interval == 0:
                 param = np.concatenate([np.asarray([gnn.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1),
@@ -380,10 +394,10 @@ class ptReplica(multiprocessing.Process):
         file_name = self.path + '/predictions/weight[1000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array2, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[10000]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[5000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array3, fmt='%1.2f')
 
-        file_name = self.path + '/predictions/weight[20000]_' + str(self.temperature) + '.txt'
+        file_name = self.path + '/predictions/weight[8000]_' + str(self.temperature) + '.txt'
         np.savetxt(file_name, weight_array4, fmt='%1.2f')
 
         file_name = self.path + '/predictions/rmse_test_chain_' + str(self.temperature) + '.txt'
@@ -401,6 +415,9 @@ class ptReplica(multiprocessing.Process):
         file_name = self.path + '/predictions/accept_percentage' + str(self.temperature) + '.txt'
         with open(file_name, 'w') as f:
             f.write('%d' % accept_ratio)
+
+        file_name = self.path + '/likelihood_value_' + str(self.temperature) + '.txt'
+        np.savetxt(file_name, likelihood_array, fmt='%1.4f')
 
 # Manages the parallel tempering, initialises and executes the parallel chains
 
@@ -674,6 +691,7 @@ class ParallelTempering:
         weight_ar2 = np.zeros((self.num_chains, self.NumSamples))
         weight_ar3 = np.zeros((self.num_chains, self.NumSamples))
         weight_ar4 = np.zeros((self.num_chains, self.NumSamples))
+        likelihood_val_array = np.zeros((self.num_chains, self.NumSamples))
 
         accept_percentage_all_chains = np.zeros(self.num_chains)
 
@@ -724,11 +742,11 @@ class ParallelTempering:
             dat = np.loadtxt(file_name)
             weight_ar2[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[10000]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[5000]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar3[i, :] = dat
 
-            file_name = self.path + '/predictions/weight[20000]_' + str(self.temperatures[i]) + '.txt'
+            file_name = self.path + '/predictions/weight[8000]_' + str(self.temperatures[i]) + '.txt'
             dat = np.loadtxt(file_name)
             weight_ar4[i, :] = dat
 
@@ -736,11 +754,16 @@ class ParallelTempering:
             dat = np.loadtxt(file_name)
             accept_percentage_all_chains[i] = dat
 
+            file_name = self.path + '/likelihood_value_' + str(self.temperatures[i]) + '.txt'
+            dat = np.loadtxt(file_name)
+            likelihood_val_array[i, :] = dat
+
         rmse_train_single_chain_plot = rmse_train[0, :]
         rmse_test_single_chain_plot = rmse_test[0, :]
         acc_train_single_chain_plot = acc_train[0, :]
         acc_test_single_chain_plot = acc_test[0, :]
         sum_val_array_single_chain_plot = sum_val_array[0]
+        likelihood_val_array_single_chain_plot = likelihood_val_array[0]
 
         #path = 'GNN/graphs'
 
@@ -748,16 +771,26 @@ class ParallelTempering:
 
         plt.plot(x2, sum_val_array_single_chain_plot, label='Sum Value')
         plt.legend(loc='upper right')
-        plt.title("Sum Value Single Chain")
         plt.savefig(self.path + '/graphs/sum_value_single_chain.png')
+        plt.clf()
+
+        plt.plot(x2, likelihood_val_array_single_chain_plot, label='Sum Value')
+        plt.legend(loc='upper right')
+        plt.ylabel("Likelihood", fontsize=13)
+        plt.xlabel("Samples", fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
+        plt.savefig(self.path + '/likelihood_value_single_chain.png')
         plt.clf()
 
         color = 'tab:red'
         plt.plot(x2, acc_train_single_chain_plot, label="Train", color=color)
         color = 'tab:blue'
         plt.plot(x2, acc_test_single_chain_plot, label="Test", color=color)
-        plt.xlabel('Samples')
-        plt.ylabel('Accuracy')
+        plt.xlabel('Samples',fontsize=13)
+        plt.ylabel('Accuracy',fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.legend()
         plt.savefig(self.path + '/graphs/superimposed_acc_single_chain.png')
         plt.clf()
@@ -787,64 +820,90 @@ class ParallelTempering:
                         num=int(self.masternumsample - self.masternumsample * self.burni))
         x1 = np.linspace(0, self.masternumsample, num=self.masternumsample)
 
+
         plt.plot(x1, weight_ar, label='Weight[0]')
         plt.legend(loc='upper right')
-        plt.title("Weight[0] Trace")
+        plt.ylabel('Parameter Values', fontsize=13)
+        plt.xlabel('Samples', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[0]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar, bins=20, color="blue", alpha=0.7)
-        plt.ylabel('Frequency')
-        plt.xlabel('Parameter Values')
+        plt.ylabel('Frequency', fontsize=13)
+        plt.xlabel('Parameter Values', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[0]_hist.png')
         plt.clf()
 
         plt.plot(x1, weight_ar1, label='Weight[100]')
         plt.legend(loc='upper right')
-        plt.title("Weight[100] Trace")
+        plt.ylabel('Parameter Values', fontsize=13)
+        plt.xlabel('Samples', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[100]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar1, bins=20, color="blue", alpha=0.7)
-        plt.ylabel('Frequency')
-        plt.xlabel('Parameter Values')
+        plt.ylabel('Frequency', fontsize=13)
+        plt.xlabel('Parameter Values', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[100]_hist.png')
         plt.clf()
 
         plt.plot(x1, weight_ar2, label='Weight[1000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[1000] Trace")
+        plt.ylabel('Parameter Values', fontsize=13)
+        plt.xlabel('Samples', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[1000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar2, bins=20, color="blue", alpha=0.7)
-        plt.ylabel('Frequency')
-        plt.xlabel('Parameter Values')
+        plt.ylabel('Frequency', fontsize=13)
+        plt.xlabel('Parameter Values', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
         plt.savefig(self.path + '/graphs/weight[1000]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar3, label='Weight[10000]')
+        plt.plot(x1, weight_ar3, label='Weight[5000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[10000] Trace")
-        plt.savefig(self.path + '/graphs/weight[10000]_samples.png')
+        plt.ylabel('Parameter Values', fontsize=13)
+        plt.xlabel('Samples', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
+        plt.savefig(self.path + '/graphs/weight[5000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar3, bins=20, color="blue", alpha=0.7)
-        plt.ylabel('Frequency')
-        plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[10000]_hist.png')
+        plt.ylabel('Frequency', fontsize=13)
+        plt.xlabel('Parameter Values', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
+        plt.savefig(self.path + '/graphs/weight[5000]_hist.png')
         plt.clf()
 
-        plt.plot(x1, weight_ar4, label='Weight[20000]')
+        plt.plot(x1, weight_ar4, label='Weight[8000]')
         plt.legend(loc='upper right')
-        plt.title("Weight[20000] Trace")
-        plt.savefig(self.path + '/graphs/weight[20000]_samples.png')
+        plt.ylabel('Parameter Values', fontsize=13)
+        plt.xlabel('Samples', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
+        plt.savefig(self.path + '/graphs/weight[8000]_samples.png')
         plt.clf()
 
         plt.hist(weight_ar4, bins=20, color="blue", alpha=0.7)
-        plt.ylabel('Frequency')
-        plt.xlabel('Parameter Values')
-        plt.savefig(self.path + '/graphs/weight[20000]_hist.png')
+        plt.ylabel('Frequency', fontsize=13)
+        plt.xlabel('Parameter Values', fontsize=13)
+        plt.yticks(fontsize=13)
+        plt.xticks(fontsize=13)
+        plt.savefig(self.path + '/graphs/weight[8000]_hist.png')
         plt.clf()
 
         plt.plot(x1, sum_val_array, label='Sum_Value')
