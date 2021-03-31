@@ -28,13 +28,13 @@ num_test= len(graph_data.y[graph_data.test_mask])
 # Initialise and parse command-line inputs
 
 parser = argparse.ArgumentParser(description='PT MCMC CNN')
-parser.add_argument('-s', '--samples', help='Number of samples', default=48000, dest="samples", type=int)
+parser.add_argument('-s', '--samples', help='Number of samples', default=80, dest="samples", type=int)
 parser.add_argument('-r', '--replicas', help='Number of chains/replicas, best to have one per availble core/cpu',
                     default=8, dest="num_chains", type=int)
 parser.add_argument('-lr', '--learning_rate', help='Learning Rate for Model', dest="learning_rate",
                     default=0.01, type=float)
 parser.add_argument('-b', '--burn', help='How many samples to discard before determing posteriors', dest="burn_in",
-                    default=0.60, type=float)
+                    default=0.75, type=float)
 parser.add_argument('-pt', '--ptsamples', help='Ratio of PT vs straight MCMC samples to run', dest="pt_samples",
                     default=0.60, type=float)
 parser.add_argument('-step', '--step_size', help='Step size for proposals (0.02, 0.05, 0.1 etc)', dest="step_size",
@@ -75,9 +75,10 @@ class Net(torch.nn.Module):
         x = self.conv2(x, edge_index, edge_weight)
         return F.log_softmax(x, dim=1)
 
-    def evaluate_proposal(self, data, w):
+    def evaluate_proposal(self, data, w=None):
         self.los =0
-        self.loadparameters(w)
+        if w is not None:
+            self.loadparameters(w)
         if (data=='train'):
             prob = copy.deepcopy(self.forward().detach())
             for _, mask in graph_data('train_mask'):
@@ -163,15 +164,14 @@ class ptReplica(multiprocessing.Process):
         self.use_langevin_gradients = use_langevin_gradients
         self.sgd_depth = 1  # Keep as 1
         self.learn_rate = learn_rate
-        self.l_prob = 0.6  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
+        self.l_prob = 1.0  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
         self.step_size = step_size
 
     def rmse(self, predictions, targets):
         return self.gnn.los.item()
 
-    #def likelihood_func(self, gnn, data, w=None):
     @staticmethod
-    def likelihood_func(gnn, data, temp, w):
+    def likelihood_func(gnn, data, temp, w=None):
         if w is not None:
             fx, prob = gnn.evaluate_proposal(data, w)
         else:
@@ -255,8 +255,8 @@ class ptReplica(multiprocessing.Process):
         sigma_squared = 25
         prior_current = self.prior_likelihood(sigma_squared, gnn.getparameters(w))
 
-        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp, w)
-        [_, pred_test, rmsetest] = self.likelihood_func(gnn, test, self.adapttemp, w)
+        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp)
+        [_, pred_test, rmsetest] = self.likelihood_func(gnn, test,self.adapttemp)
 
         num_accepted = 0
         langevin_count = 0
@@ -309,8 +309,8 @@ class ptReplica(multiprocessing.Process):
                 diff_prop = 0
                 w_proposal = gnn.addnoiseandcopy(0, step_w)  # np.random.normal(w, step_w, w_size)
 
-            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp, w)
-            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test, self.adapttemp, w)
+            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train,self.adapttemp)
+            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test,self.adapttemp)
 
             prior_prop = self.prior_likelihood(sigma_squared,
                                                gnn.getparameters(w_proposal))  # takes care of the gradients
@@ -361,13 +361,19 @@ class ptReplica(multiprocessing.Process):
                 param = np.concatenate([np.asarray([gnn.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1),
                                         np.asarray([likelihood]), np.asarray([self.adapttemp]), np.asarray([i])])
                 self.parameter_queue.put(param)
-                #self.parameter_queue.put(w)
                 self.signal_main.set()
                 self.event.clear()
                 self.event.wait()
+                result = self.parameter_queue.get()
+                w = gnn.dictfromlist(result[0:w_size])
+                eta = result[w_size]
 
             if i % 100 == 0:
                 print(i, rmsetrain, rmsetest, 'Iteration Number and MAE Train & Test')
+
+        param = np.concatenate(
+            [np.asarray([gnn.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1), np.asarray([likelihood]),
+             np.asarray([self.adapttemp]), np.asarray([i])])
 
         self.signal_main.set()
 
@@ -567,13 +573,10 @@ class ParallelTempering:
         #        if parameter_queue_2.empty() is False and parameter_queue_1.empty() is False:
         param1 = parameter_queue_1.get()
         param2 = parameter_queue_2.get()
-        #print(parameter_queue_1.get())
-        #w1 = parameter_queue_1.get()
         w1 = param1[0:self.num_param]
         w1 = self.gnn.dictfromlist(w1)
-        lhood1 = param1[self.num_param + 1]
         T1 = param1[self.num_param + 2]
-        #w2 = parameter_queue_2.get()
+        lhood1 = param1[self.num_param + 1]
         w2 = param2[0:self.num_param]
         w2 = self.gnn.dictfromlist(w2)
         lhood2 = param2[self.num_param + 1]
@@ -583,7 +586,7 @@ class ParallelTempering:
         lhood21, dump1, dump2 = ptReplica.likelihood_func(self.gnn, self.traindata, T1, w2)
         try:
             swap_proposal = min(1, np.exp((lhood12 - lhood1) + (lhood21 - lhood2)))
-        except  OverflowError:
+        except OverflowError:
             swap_proposal = 1
         u = np.random.uniform(0, 1)
         if u < swap_proposal:
@@ -594,20 +597,12 @@ class ParallelTempering:
             param1 = param2
             param2 = param_temp
             param1[self.num_param + 1] = lhood21
-            param1[self.num_param + 2] = T2
             param2[self.num_param + 1] = lhood12
+            param1[self.num_param + 2] = T2
             param2[self.num_param + 2] = T1
-            #self.parameter_queue[index].put(param1)
-            #self.parameter_queue[index].put(w1)
-            #self.parameter_queue[index + 1].put(param2)
-            #self.parameter_queue[index + 1].put(w2)
         else:
             swapped = False
             self.total_swap_proposals += 1
-            #self.parameter_queue[index].put(param1)
-            #self.parameter_queue[index].put(w1)
-            #self.parameter_queue[index + 1].put(param2)
-            #self.parameter_queue[index + 1].put(w2)
         return param1, param2, swapped
 
     def run_chains(self):
@@ -660,14 +655,15 @@ class ParallelTempering:
 
             for index in range(0, self.num_chains - 1):
                 # print('Starting Swap')
-                param_1, param_2, swapped = self.swap_procedure(self.parameter_queue[index],self.parameter_queue[index + 1])
+                swapped = False
+                param_1, param_2, swapped = self.swap_procedure(self.parameter_queue[index],
+                                                                self.parameter_queue[index + 1])
                 self.parameter_queue[index].put(param_1)
                 self.parameter_queue[index + 1].put(param_2)
                 if index == 0:
                     if swapped:
                         swaps_affected_main += 1
                     total_swaps += 1
-
             for index in range(self.num_chains):
                 self.wait_chain[index].clear()
                 self.event[index].set()
