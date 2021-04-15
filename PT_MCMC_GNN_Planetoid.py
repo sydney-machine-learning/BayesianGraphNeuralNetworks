@@ -17,6 +17,8 @@ from torch_geometric.nn import GCNConv, ChebConv
 
 mpl.use('agg')
 
+# Loading Dataset
+
 dataset = 'Cora'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
 dataset = Planetoid(path, dataset, split='public',transform=T.NormalizeFeatures())
@@ -51,6 +53,8 @@ if args.use_gdc:
                 sparsification_kwargs=dict(method='topk', k=128,
                                            dim=0), exact=True)
     graph_data = gdc(graph_data)
+   
+#Neural Network Model Class
 
 class Net(torch.nn.Module):
     def __init__(self, lrate):
@@ -94,6 +98,8 @@ class Net(torch.nn.Module):
             self.los += loss
             prob = prob[mask]
         return y_pred, prob
+      
+     #  One-Step Gradient
 
     def langevin_gradient(self, w=None):
         if w is not None:
@@ -106,6 +112,7 @@ class Net(torch.nn.Module):
         self.los += copy.deepcopy(loss.item())
         return copy.deepcopy(self.state_dict())
 
+    #Retrieve Weights and Biases from model
     def getparameters(self, w=None):
         l = np.array([1, 2])
         dic = {}
@@ -118,6 +125,7 @@ class Net(torch.nn.Module):
         l = l[2:]
         return l
 
+    #Convert Numpy array to Ordered Dict (Used for Model parameters)
     def dictfromlist(self, param):
         dic = {}
         i = 0
@@ -131,6 +139,7 @@ class Net(torch.nn.Module):
     def loadparameters(self, param):
         self.load_state_dict(param)
 
+    #Add Noise To Parameters
     def addnoiseandcopy(self, mea, std_dev):
         dic = {}
         w = self.state_dict()
@@ -139,6 +148,7 @@ class Net(torch.nn.Module):
         self.loadparameters(dic)
         return dic
 
+# Class for one MCMC chain
 class ptReplica(multiprocessing.Process):
     def __init__(self, use_langevin_gradients, learn_rate, w, minlim_param, maxlim_param, samples,
                  burn_in, temperature, swap_interval, path, parameter_queue, main_process, event, step_size):
@@ -222,6 +232,7 @@ class ptReplica(multiprocessing.Process):
                 acc = pred.eq(graph_data.y[mask]).sum().item() / mask.sum().item()
         return 100 * acc
 
+    
     def run(self):
         samples = self.samples
         gnn = self.gnn
@@ -231,6 +242,7 @@ class ptReplica(multiprocessing.Process):
         w_size = len(gnn.getparameters(w))
         step_w = self.step_size
 
+        #Initialise Numpy Arrays
         rmse_train = np.zeros(samples)
         rmse_test = np.zeros(samples)
         acc_train = np.zeros(samples)
@@ -252,9 +264,9 @@ class ptReplica(multiprocessing.Process):
         train = 'train'
         test = 'test'
 
+        #Calculate Initial Prior & Likelihood
         sigma_squared = 25
         prior_current = self.prior_likelihood(sigma_squared, gnn.getparameters(w))
-
         [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp)
         [_, pred_test, rmsetest] = self.likelihood_func(gnn, test,self.adapttemp)
 
@@ -292,7 +304,9 @@ class ptReplica(multiprocessing.Process):
 
             lx = np.random.uniform(0, 1, 1)
             old_w = gnn.state_dict()
-
+            
+            #Whether to do langevin gradients or add random noise based on lx
+            
             if (self.use_langevin_gradients is True) and (lx < self.l_prob):
                 w_gd = gnn.langevin_gradient()  # Eq 8
                 w_proposal = gnn.addnoiseandcopy(0, step_w)  # np.random.normal(w_gd, step_w, w_size) # Eq 7
@@ -320,7 +334,8 @@ class ptReplica(multiprocessing.Process):
             likelihood_proposal_array[i] = likelihood_proposal
             likelihood_array[i] = likelihood
             diff_likelihood_array[i] = diff_likelihood
-
+            
+            # Acceptance criteria is sum of difference between current & proposed likelihood, prior & proposal.
             sum_value = diff_likelihood + diff_prior + diff_prop
             sum_value_array[i] = sum_value
             u = np.log(random.uniform(0, 1))
@@ -329,7 +344,7 @@ class ptReplica(multiprocessing.Process):
                 num_accepted = num_accepted + 1
                 likelihood = likelihood_proposal
                 prior_current = prior_prop
-                w = copy.deepcopy(w_proposal)  # rnn.getparameters(w_proposal)
+                w = copy.deepcopy(w_proposal)  # gnn.getparameters(w_proposal)
                 acc_train1 = self.accuracy(train)
                 acc_test1 = self.accuracy(test)
                 print (i, rmsetrain, rmsetest, acc_train1, acc_test1, 'accepted')
@@ -339,6 +354,8 @@ class ptReplica(multiprocessing.Process):
                 acc_test[i,] = acc_test1
 
             else:
+                
+                #Discard proposed weights and load previous weights again
                 w = old_w
                 gnn.loadparameters(w)
                 acc_train1 = self.accuracy(train)
@@ -349,8 +366,9 @@ class ptReplica(multiprocessing.Process):
                 acc_train[i,] = acc_train[i - 1,]
                 acc_test[i,] = acc_test[i - 1,]
 
+            #Record 5 Random weights
             ll = gnn.getparameters()
-            #print(ll.size)
+       
             weight_array[i] = ll[0]
             weight_array1[i] = ll[100]
             weight_array2[i] = ll[1000]
@@ -965,7 +983,7 @@ def main():
     bi = burn_in
     swap_interval = 2 #how ofen you swap neighbours. note if swap is more than Num_samples, its off
 
-    # learn_rate = 0.01  # in case langevin gradients are used. Can select other values, we found small value is ok.
+    # learn_rate = 0.01  # in case langevin gradients are used.
 
     problemfolder = 'Graph_torch/GNN'  # change this to your directory for results output - produces large datasets
 
