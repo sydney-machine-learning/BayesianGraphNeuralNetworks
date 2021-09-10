@@ -17,9 +17,7 @@ from torch_geometric.nn import GCNConv, ChebConv
 
 mpl.use('agg')
 
-# Loading Dataset
-
-dataset = 'Cora'
+dataset = 'PubMed'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
 dataset = Planetoid(path, dataset, split='public',transform=T.NormalizeFeatures())
 graph_data = dataset[0]
@@ -30,20 +28,22 @@ num_test= len(graph_data.y[graph_data.test_mask])
 # Initialise and parse command-line inputs
 
 parser = argparse.ArgumentParser(description='PT MCMC CNN')
-parser.add_argument('-s', '--samples', help='Number of samples', default=80, dest="samples", type=int)
+parser.add_argument('-s', '--samples', help='Number of samples', default=48000, dest="samples", type=int)
 parser.add_argument('-r', '--replicas', help='Number of chains/replicas, best to have one per availble core/cpu',
                     default=8, dest="num_chains", type=int)
 parser.add_argument('-lr', '--learning_rate', help='Learning Rate for Model', dest="learning_rate",
-                    default=0.01, type=float)
+                    default=0.1, type=float)
 parser.add_argument('-b', '--burn', help='How many samples to discard before determing posteriors', dest="burn_in",
-                    default=0.75, type=float)
-parser.add_argument('-pt', '--ptsamples', help='Ratio of PT vs straight MCMC samples to run', dest="pt_samples",
+                    default=0.60, type=float)
+parser.add_argument('-pt', '--ptsamples', help='Ratio of PT vs straight MCMC samples to run', dest="pt_percentage",
                     default=0.60, type=float)
 parser.add_argument('-step', '--step_size', help='Step size for proposals (0.02, 0.05, 0.1 etc)', dest="step_size",
                     default=0.005, type=float)
 parser.add_argument('--use_gdc', action='store_true',
                     help='Use GDC preprocessing.')
 args = parser.parse_args()
+
+pt_percentage = args.pt_percentage
 
 
 if args.use_gdc:
@@ -53,8 +53,6 @@ if args.use_gdc:
                 sparsification_kwargs=dict(method='topk', k=128,
                                            dim=0), exact=True)
     graph_data = gdc(graph_data)
-   
-#Neural Network Model Class
 
 class Net(torch.nn.Module):
     def __init__(self, lrate):
@@ -64,11 +62,11 @@ class Net(torch.nn.Module):
         self.conv2 = GCNConv(16, dataset.num_classes, cached=True,
                              normalize=not args.use_gdc)
         #self.optimizer = torch.optim.Adam(self.parameters(), lr=lrate, weight_decay=0.0005)
-        self.optimizer = torch.optim.Adam([
-            dict(params=self.conv1.parameters(),weight_decay=5e-4),
-            dict(params=self.conv2.parameters(),weight_decay=0)
-        ], lr=lrate)
-        #self.optimizer = torch.optim.SGD(self.parameters(), lr=lrate)
+        #self.optimizer = torch.optim.Adam([
+        #    dict(params=self.conv1.parameters(),weight_decay=5e-4),
+        #    dict(params=self.conv2.parameters(),weight_decay=0)
+        #], lr=lrate)
+        self.optimizer = torch.optim.SGD(self.parameters(), lr=lrate)
         # self.conv1 = ChebConv(data.num_features, 16, K=2)
         # self.conv2 = ChebConv(16, data.num_features, K=2)
 
@@ -98,12 +96,10 @@ class Net(torch.nn.Module):
             self.los += loss
             prob = prob[mask]
         return y_pred, prob
-      
-     #  One-Step Gradient
 
-    def langevin_gradient(self, w=None):
-        if w is not None:
-            self.loadparameters(w)
+    def langevin_gradient(self, w):
+
+        self.loadparameters(w)
         self.los = 0
         self.optimizer.zero_grad()
         loss = F.nll_loss(self.forward()[graph_data.train_mask], graph_data.y[graph_data.train_mask])
@@ -112,7 +108,6 @@ class Net(torch.nn.Module):
         self.los += copy.deepcopy(loss.item())
         return copy.deepcopy(self.state_dict())
 
-    #Retrieve Weights and Biases from model
     def getparameters(self, w=None):
         l = np.array([1, 2])
         dic = {}
@@ -125,7 +120,6 @@ class Net(torch.nn.Module):
         l = l[2:]
         return l
 
-    #Convert Numpy array to Ordered Dict (Used for Model parameters)
     def dictfromlist(self, param):
         dic = {}
         i = 0
@@ -139,16 +133,14 @@ class Net(torch.nn.Module):
     def loadparameters(self, param):
         self.load_state_dict(param)
 
-    #Add Noise To Parameters
-    def addnoiseandcopy(self, mea, std_dev):
+    def addnoiseandcopy(self, w, mea, std_dev):
         dic = {}
-        w = self.state_dict()
+        #w = self.state_dict()
         for name in (w.keys()):
             dic[name] = copy.deepcopy(w[name]) + torch.zeros(w[name].size()).normal_(mean=mea, std=std_dev)
         self.loadparameters(dic)
         return dic
 
-# Class for one MCMC chain
 class ptReplica(multiprocessing.Process):
     def __init__(self, use_langevin_gradients, learn_rate, w, minlim_param, maxlim_param, samples,
                  burn_in, temperature, swap_interval, path, parameter_queue, main_process, event, step_size):
@@ -174,14 +166,14 @@ class ptReplica(multiprocessing.Process):
         self.use_langevin_gradients = use_langevin_gradients
         self.sgd_depth = 1  # Keep as 1
         self.learn_rate = learn_rate
-        self.l_prob = 1.0  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
+        self.l_prob = 0.6  # Ratio of langevin based proposals, higher value leads to more computation time, evaluate for different problems
         self.step_size = step_size
 
     def rmse(self, predictions, targets):
         return self.gnn.los.item()
 
     @staticmethod
-    def likelihood_func(gnn, data, temp, w=None):
+    def likelihood_func(gnn, data, w, temp):
         if w is not None:
             fx, prob = gnn.evaluate_proposal(data, w)
         else:
@@ -232,7 +224,6 @@ class ptReplica(multiprocessing.Process):
                 acc = pred.eq(graph_data.y[mask]).sum().item() / mask.sum().item()
         return 100 * acc
 
-    
     def run(self):
         samples = self.samples
         gnn = self.gnn
@@ -242,7 +233,6 @@ class ptReplica(multiprocessing.Process):
         w_size = len(gnn.getparameters(w))
         step_w = self.step_size
 
-        #Initialise Numpy Arrays
         rmse_train = np.zeros(samples)
         rmse_test = np.zeros(samples)
         acc_train = np.zeros(samples)
@@ -257,22 +247,22 @@ class ptReplica(multiprocessing.Process):
         weight_array4 = np.zeros(samples)
         sum_value_array = np.zeros(samples)
 
-        eta = 0 #junk
-
-        w_proposal = np.random.randn(w_size)
-        w_proposal = gnn.dictfromlist(w_proposal)
+        w_proposal_ = np.random.randn(w_size)
+        w_proposal = gnn.dictfromlist(w_proposal_)
         train = 'train'
         test = 'test'
 
-        #Calculate Initial Prior & Likelihood
         sigma_squared = 25
-        prior_current = self.prior_likelihood(sigma_squared, gnn.getparameters(w))
-        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp)
-        [_, pred_test, rmsetest] = self.likelihood_func(gnn, test,self.adapttemp)
+        prior_current = self.prior_likelihood(sigma_squared, w_proposal_)
+
+        eta = 0 #junk
+
+        [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, w_proposal, self.adapttemp)
+        [likelihood, pred_train, rmsetest] = self.likelihood_func(gnn, test, w_proposal, self.adapttemp)
 
         num_accepted = 0
         langevin_count = 0
-        pt_samples = samples * 0.6  # PT in canonical form with adaptive temp will work till assigned limit
+        pt_samples = samples * pt_percentage # PT in canonical form with adaptive temp will work till assigned limit
         init_count = 0
 
         rmse_train[0] = rmsetrain
@@ -298,44 +288,41 @@ class ptReplica(multiprocessing.Process):
                 self.adapttemp = self.temperature  # T1=T/log(k+1);
             if i == pt_samples and init_count == 0:  # Move to canonical MCMC
                 self.adapttemp = 1
-                [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, self.adapttemp, w)
-                [_, pred_test, rmsetest] = self.likelihood_func(gnn, test, self.adapttemp, w)
+                [likelihood, pred_train, rmsetrain] = self.likelihood_func(gnn, train, w_proposal, self.adapttemp)
+                [_, pred_test, rmsetest] = self.likelihood_func(gnn, test, w_proposal, self.adapttemp)
                 init_count = 1
 
             lx = np.random.uniform(0, 1, 1)
             old_w = gnn.state_dict()
-            
-            #Whether to do langevin gradients or add random noise based on lx
-            
+
             if (self.use_langevin_gradients is True) and (lx < self.l_prob):
-                w_gd = gnn.langevin_gradient()  # Eq 8
-                w_proposal = gnn.addnoiseandcopy(0, step_w)  # np.random.normal(w_gd, step_w, w_size) # Eq 7
-                w_prop_gd = gnn.langevin_gradient()
-                wc_delta = (gnn.getparameters(w) - gnn.getparameters(w_prop_gd))
+                w_gd = gnn.langevin_gradient(copy.deepcopy(w))  # Eq 8
+                w_proposal = gnn.addnoiseandcopy(w_gd, 0, step_w)  # np.random.normal(w_gd, step_w, w_size) # Eq 7
+                w_prop_gd = gnn.langevin_gradient(copy.deepcopy(w_proposal))
+                wc_delta = (gnn.getparameters(copy.deepcopy(w)) - gnn.getparameters(w_prop_gd))
                 wp_delta = (gnn.getparameters(w_proposal) - gnn.getparameters(w_gd))
                 sigma_sq = step_w * step_w
                 first = -0.5 * np.sum(wc_delta * wc_delta) / sigma_sq  # this is wc_delta.T  *  wc_delta /sigma_sq
                 second = -0.5 * np.sum(wp_delta * wp_delta) / sigma_sq
                 diff_prop = first - second
-                diff_prop = diff_prop / self.adapttemp
+                diff_prop = diff_prop
                 langevin_count = langevin_count + 1
             else:
                 diff_prop = 0
-                w_proposal = gnn.addnoiseandcopy(0, step_w)  # np.random.normal(w, step_w, w_size)
+                w_proposal = gnn.addnoiseandcopy(copy.deepcopy(w), 0, step_w)  # np.random.normal(w, step_w, w_size)
 
-            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train,self.adapttemp)
-            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test,self.adapttemp)
+            [likelihood_proposal, pred_train, rmsetrain] = self.likelihood_func(gnn, train, copy.deepcopy(w_proposal), self.adapttemp)
+            [likelihood_ignore, pred_test, rmsetest] = self.likelihood_func(gnn, test, copy.deepcopy(w_proposal), self.adapttemp)
 
             prior_prop = self.prior_likelihood(sigma_squared,
-                                               gnn.getparameters(w_proposal))  # takes care of the gradients
+                                               gnn.getparameters(copy.deepcopy(w_proposal)))  # takes care of the gradients
             diff_likelihood = likelihood_proposal - likelihood
             diff_prior = prior_prop - prior_current
 
             likelihood_proposal_array[i] = likelihood_proposal
             likelihood_array[i] = likelihood
             diff_likelihood_array[i] = diff_likelihood
-            
-            # Acceptance criteria is sum of difference between current & proposed likelihood, prior & proposal.
+
             sum_value = diff_likelihood + diff_prior + diff_prop
             sum_value_array[i] = sum_value
             u = np.log(random.uniform(0, 1))
@@ -344,7 +331,7 @@ class ptReplica(multiprocessing.Process):
                 num_accepted = num_accepted + 1
                 likelihood = likelihood_proposal
                 prior_current = prior_prop
-                w = copy.deepcopy(w_proposal)  # gnn.getparameters(w_proposal)
+                w = copy.deepcopy(w_proposal)  # rnn.getparameters(w_proposal)
                 acc_train1 = self.accuracy(train)
                 acc_test1 = self.accuracy(test)
                 print (i, rmsetrain, rmsetest, acc_train1, acc_test1, 'accepted')
@@ -354,8 +341,6 @@ class ptReplica(multiprocessing.Process):
                 acc_test[i,] = acc_test1
 
             else:
-                
-                #Discard proposed weights and load previous weights again
                 w = old_w
                 gnn.loadparameters(w)
                 acc_train1 = self.accuracy(train)
@@ -366,9 +351,8 @@ class ptReplica(multiprocessing.Process):
                 acc_train[i,] = acc_train[i - 1,]
                 acc_test[i,] = acc_test[i - 1,]
 
-            #Record 5 Random weights
             ll = gnn.getparameters()
-       
+            #print(ll.size)
             weight_array[i] = ll[0]
             weight_array1[i] = ll[100]
             weight_array2[i] = ll[1000]
@@ -600,8 +584,8 @@ class ParallelTempering:
         lhood2 = param2[self.num_param + 1]
         T2 = param2[self.num_param + 2]
         # SWAPPING PROBABILITIES
-        lhood12, dump1, dump2 = ptReplica.likelihood_func(self.gnn, self.traindata, T2, w1)
-        lhood21, dump1, dump2 = ptReplica.likelihood_func(self.gnn, self.traindata, T1, w2)
+        lhood12, dump1, dump2 = ptReplica.likelihood_func(self.gnn, self.traindata, w1, T2)
+        lhood21, dump1, dump2 = ptReplica.likelihood_func(self.gnn, self.traindata, w2, T1)
         try:
             swap_proposal = min(1, np.exp((lhood12 - lhood1) + (lhood21 - lhood2)))
         except OverflowError:
@@ -704,7 +688,7 @@ class ParallelTempering:
         return rmse_train, rmse_test, acc_train, acc_test, apal, swap_perc
 
     def show_results(self):
-        burnin = int(self.NumSamples * self.burn_in)
+        burnin_samples = int(self.NumSamples * self.burn_in)
         mcmc_samples = int(self.NumSamples * 0.25)
         # likelihood_rep = np.zeros((self.num_chains, self.NumSamples - burnin,2))  # index 1 for likelihood posterior and index 0 for Likelihood proposals. Note all likilihood proposals plotted only
         # accept_percent = np.zeros((self.num_chains, 1))
@@ -838,6 +822,11 @@ class ParallelTempering:
         plt.savefig(self.path + '/graphs/superimposed_rmse_single_chain.png')
         plt.clf()
 
+        rmse_train1 = rmse_train[:, burnin_samples:]
+        rmse_test1 = rmse_test[:, burnin_samples:]
+        acc_train1 = acc_train[:, burnin_samples:]
+        acc_test1 = acc_test[:, burnin_samples:]
+
         rmse_train = rmse_train.reshape((self.num_chains * self.NumSamples), 1)
         acc_train = acc_train.reshape((self.num_chains * self.NumSamples), 1)
         rmse_test = rmse_test.reshape((self.num_chains * self.NumSamples), 1)
@@ -965,7 +954,7 @@ class ParallelTempering:
         plt.savefig(self.path + '/graphs/superimposed_rmse.png')
         plt.clf()
 
-        return rmse_train, rmse_test, acc_train, acc_test, accept_percentage_all_chains
+        return rmse_train1, rmse_test1, acc_train1, acc_test1, accept_percentage_all_chains
 
     def make_directory(self, directory):
         if not os.path.exists(directory):
@@ -983,7 +972,7 @@ def main():
     bi = burn_in
     swap_interval = 2 #how ofen you swap neighbours. note if swap is more than Num_samples, its off
 
-    # learn_rate = 0.01  # in case langevin gradients are used.
+    # learn_rate = 0.01  # in case langevin gradients are used. Can select other values, we found small value is ok.
 
     problemfolder = 'Graph_torch/GNN'  # change this to your directory for results output - produces large datasets
 
@@ -1032,23 +1021,21 @@ def main():
     rmsetes_max = np.amax(rmse_test[:])
     """
 
-    burnin = burn_in
+    rmse_tr = np.mean(rmse_train)
+    rmsetr_std = np.std(rmse_train)
+    rmsetr_max = np.amin(rmse_train)
 
-    acc_tr = np.mean(acc_train[int(numSamples * burnin):])
-    acctr_std = np.std(acc_train[int(numSamples * burnin):])
-    acctr_max = np.amax(acc_train[int(numSamples * burnin):])
+    rmse_tes = np.mean(rmse_test)
+    rmsetest_std = np.std(rmse_test)
+    rmsetes_max = np.amin(rmse_test)
 
-    acc_tes = np.mean(acc_test[int(numSamples * burnin):])
-    acctest_std = np.std(acc_test[int(numSamples * burnin):])
-    acctes_max = np.amax(acc_test[int(numSamples * burnin):])
+    acc_tr = np.mean(acc_train)
+    acctr_std = np.std(acc_train)
+    acctr_max = np.amax(acc_train)
 
-    rmse_tr = np.mean(rmse_train[int(numSamples * burnin):])
-    rmsetr_std = np.std(rmse_train[int(numSamples * burnin):])
-    rmsetr_max = np.amax(rmse_train[int(numSamples * burnin):])
-
-    rmse_tes = np.mean(rmse_test[int(numSamples * burnin):])
-    rmsetest_std = np.std(rmse_test[int(numSamples * burnin):])
-    rmsetes_max = np.amax(rmse_test[int(numSamples * burnin):])
+    acc_tes = np.mean(acc_test)
+    acctest_std = np.std(acc_test)
+    acctes_max = np.amax(acc_test)
 
     accept_percent_mean = np.mean(accept_percent_all)
 
